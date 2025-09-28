@@ -61,24 +61,34 @@ const DEFAULT_HEADERS = {
 };
 
 /**
- * Text patterns indicating placeholder or parked pages
+ * Content detection patterns organized by category
+ * These patterns help identify different types of pages and protection mechanisms
  */
-const PLACEHOLDER_PATTERNS = [
-  "Welcome to nginx!",
-  "This domain is parked",
-  "Buy this domain",
-  "Domain for sale",
-  "Default PLESK Page",
-];
+const CONTENT_PATTERNS = {
+  /**
+   * Text patterns indicating placeholder or parked pages
+   * These indicate domains that are not actively hosting content
+   * Common examples include default web server pages or domain parking services
+   */
+  PLACEHOLDER: [
+    "Welcome to nginx!",
+    "This domain is parked",
+    "Buy this domain",
+    "Domain for sale",
+    "Default PLESK Page",
+  ],
 
-/**
- * Text patterns indicating Web Application Firewall protection
- */
-const WAF_PATTERNS = [
-  "Attention Required! | Cloudflare",
-  "Checking your browser before accessing",
-  "DDOS protection by",
-];
+  /**
+   * Text patterns indicating Web Application Firewall protection
+   * These indicate the site is protected by security services and may not 
+   * be accessible to automated tools without proper handling
+   */
+  WAF: [
+    "Attention Required! | Cloudflare",
+    "Checking your browser before accessing",
+    "DDOS protection by",
+  ],
+};
 
 /**
  * Cloudflare error descriptions for better understanding of issues
@@ -141,6 +151,28 @@ let GLOBAL_DEBUG = false;
 let SPECIFIC_DOMAIN_DEBUG = null;
 
 /**
+ * Unified function to handle SSL error detection and classification
+ * @param {string} domain - The domain being checked (for logging)
+ * @param {string} errorCode - The error code from the SSL error
+ * @param {string} errorMessage - The error message from the SSL error
+ * @returns {Object} Standardized error object with status and details
+ */
+function handleSSLError(domain, errorCode, errorMessage) {
+  debugLog(
+    domain,
+    "SSL certificate issue detected:",
+    errorCode,
+    errorMessage,
+  );
+  
+  return { 
+    status: "SSL_ISSUE", 
+    error: errorCode, 
+    message: errorMessage 
+  };
+}
+
+/**
  * Debug logging function that respects debug flags
  * @param {string} domain - The domain being checked
  * @param {...any} args - Arguments to log
@@ -182,6 +214,7 @@ async function isDomainResolvable(domain) {
 
 /**
  * Fetch a URL with timeout and return status, headers, and body
+ * This function handles the actual HTTP/HTTPS requests with proper error handling
  * @param {string} domain - The domain being checked (for logging)
  * @param {string} url - URL to fetch
  * @param {number} timeoutMs - Timeout in milliseconds
@@ -191,13 +224,17 @@ async function fetchUrl(domain, url, timeoutMs = REQUEST_TIMEOUT_MS) {
   debugLog(domain, "Fetching", url);
 
   // Extract domain from URL for error logging
+  // This provides more detailed error information when debugging
   const urlObj = new URL(url);
   const urlDomain = urlObj.hostname;
 
   return new Promise((resolve) => {
+    // Choose the appropriate HTTP client based on protocol
+    // This ensures we use the correct client for HTTPS vs HTTP requests
     const client = urlObj.protocol === "https:" ? https : http;
 
     // Add default headers to the request
+    // These headers help avoid bot detection by mimicking a real browser
     const requestOptions = {
       hostname: urlObj.hostname,
       port: urlObj.port,
@@ -206,15 +243,20 @@ async function fetchUrl(domain, url, timeoutMs = REQUEST_TIMEOUT_MS) {
       headers: DEFAULT_HEADERS,
     };
 
+    // Implement request timeout to prevent hanging requests
+    // This is crucial for handling slow or unresponsive servers
     const timer = setTimeout(() => {
       debugLog(domain, "Timeout fetching", url, "after", timeoutMs, "ms");
       resolve({ status: "TIMEOUT" });
     }, timeoutMs);
 
+    // Make the actual HTTP request
     const req = client.request(requestOptions, (res) => {
+      // Clear the timeout timer since we received a response
       clearTimeout(timer);
 
-      // Log response headers
+      // Log response headers for debugging purposes
+      // This information is valuable for diagnosing issues
       debugLog(domain, "Response received for", url, "with status", res.statusCode);
       debugLog(domain, "Response headers:");
       Object.entries(res.headers).forEach(function (entry) {
@@ -223,6 +265,8 @@ async function fetchUrl(domain, url, timeoutMs = REQUEST_TIMEOUT_MS) {
         debugLog(domain, "  " + key + ": " + value);
       });
 
+      // Collect response body data
+      // We limit the body size to prevent memory issues with very large responses
       let body = "";
       res.on("data", (chunk) => {
         if (body.length < 8192) body += chunk.toString();
@@ -233,6 +277,8 @@ async function fetchUrl(domain, url, timeoutMs = REQUEST_TIMEOUT_MS) {
       });
     });
 
+    // Handle request errors
+    // This includes network errors, DNS issues, and SSL/TLS problems
     req.on("error", (err) => {
       clearTimeout(timer);
       debugLog(domain, "Request error for", url, err.code, err.message);
@@ -245,14 +291,9 @@ async function fetchUrl(domain, url, timeoutMs = REQUEST_TIMEOUT_MS) {
           "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
         ].includes(err.code)
       ) {
-        debugLog(
-          domain,
-          urlDomain,
-          "SSL certificate issue detected:",
-          err.code,
-          err.message,
-        );
-        resolve({ status: "SSL_ISSUE", error: err.code, message: err.message });
+        // Use unified SSL error handling
+        const sslError = handleSSLError(domain, err.code, err.message);
+        resolve(sslError);
       } else resolve({ status: "UNREACHABLE" });
     });
 
@@ -265,19 +306,23 @@ async function fetchUrl(domain, url, timeoutMs = REQUEST_TIMEOUT_MS) {
 
 /**
  * Determine if a page is blank or only contains JavaScript
+ * This helps identify pages that don't provide meaningful content to users
  * @param {string} domain - The domain being checked (for logging)
  * @param {string} body - Response body to analyze
  * @returns {string|boolean} Status string or false if not empty/JS-only
  */
 function isEmptyOrJsOnly(domain, body) {
+  // Handle empty response bodies
   if (!body) return "EMPTY_PAGE";
 
   // Remove head and noscript sections
+  // These sections often contain metadata or fallback content that isn't relevant to content analysis
   let stripped = body.replace(/<head[^>]*>[\s\S]*?<\/head>/gi, "");
   stripped = stripped.replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, "");
   stripped = stripped.replace(/\s/g, "");
 
   // Extract script content
+  // This helps distinguish between truly empty pages and pages that rely heavily on JavaScript
   const scriptMatches = body.match(/<script[^>]*>([\s\S]*?)<\/script>/gi);
   const scriptContent = scriptMatches
     ? scriptMatches
@@ -286,6 +331,9 @@ function isEmptyOrJsOnly(domain, body) {
         .trim()
     : "";
 
+  // Classify pages based on content
+  // JS_ONLY: Pages with no visible content but with JavaScript (may load content dynamically)
+  // EMPTY_PAGE: Pages with no meaningful content at all
   if (stripped === "" && scriptContent) return "JS_ONLY";
   return stripped.length === 0 ? "EMPTY_PAGE" : false;
 }
@@ -307,6 +355,8 @@ async function checkDomainStatus(domain) {
     let redirects = 0;
 
     while (redirects < MAX_REDIRECTS) {
+      // Track visited URLs to detect redirect loops
+      // This is essential to prevent infinite loops in redirect chains
       if (visited.has(url)) {
         debugLog(domain, domain, "Redirect loop detected at", url);
         return "REDIRECT_LOOP";
@@ -322,6 +372,7 @@ async function checkDomainStatus(domain) {
         if (status === "SSL_ISSUE") {
           debugLog(domain, domain, "SSL issue:", error, message);
           // Try HTTP instead of HTTPS for sites with SSL issues
+          // This provides a fallback for sites with certificate problems
           if (protocol === "https") {
             debugLog(domain, domain, "Will try HTTP instead of HTTPS");
             break; // Exit the while loop to try HTTP
@@ -332,16 +383,21 @@ async function checkDomainStatus(domain) {
       }
 
       // Follow redirects
+      // Handle HTTP 3xx redirect responses by following the Location header
       if (statusCode >= 300 && statusCode < 400 && headers.location) {
         try {
           const redirectUrl = new URL(headers.location, url);
-          // Check if this is a protocol flip (HTTPS to HTTP or vice versa) to the same domain
+          
+          // Special handling for protocol flips (HTTP ↔ HTTPS)
+          // Some sites legitimately flip between protocols for the same domain
+          // This is common for sites that want to ensure users are on the correct protocol
           if (
             redirectUrl.hostname === domain &&
             ((url.startsWith("https://") && redirectUrl.protocol === "http:") ||
               (url.startsWith("http://") && redirectUrl.protocol === "https:"))
           ) {
             // Check if we've already visited this protocol for this domain
+            // This detects infinite protocol flip loops while allowing legitimate single flips
             const protocolKey = `${redirectUrl.protocol}//${redirectUrl.hostname}${redirectUrl.pathname}${redirectUrl.search}`;
             if (visited.has(protocolKey)) {
               debugLog(
@@ -354,6 +410,7 @@ async function checkDomainStatus(domain) {
               );
               // This is a special case - the site works but has a protocol flip loop
               // Let's try to determine if the site is actually accessible
+              // Protocol flip loops are often accessible in browsers due to client-side handling
               return "PROTOCOL_FLIP_LOOP";
             }
           }
@@ -368,10 +425,12 @@ async function checkDomainStatus(domain) {
         }
       }
 
-      // HTTP errors
+      // HTTP errors (5xx server errors)
+      // These can indicate server-side issues or Cloudflare protection
       if (statusCode >= 500) {
         debugLog(domain, domain, "Server error", statusCode);
         // Check for Cloudflare-specific errors and add descriptions
+        // Cloudflare uses specific error codes to indicate different types of issues
         if (statusCode >= 500 && statusCode <= 526) {
           const errorCode = statusCode.toString();
           if (CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]) {
@@ -382,8 +441,16 @@ async function checkDomainStatus(domain) {
               CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode],
             );
             // Handle Cloudflare SSL errors (525 and 526) as SSL issues
+            // These specifically indicate SSL/TLS handshake or certificate problems
+            // Classifying them as SSL_ISSUE ensures consistent handling with other SSL errors
             if (errorCode === "525" || errorCode === "526") {
-              return "SSL_ISSUE";
+              // Use unified SSL error handling for consistency
+              const sslError = handleSSLError(
+                domain, 
+                `CLOUDFLARE_${errorCode}`, 
+                CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]
+              );
+              return sslError.status;
             }
             // Handle other Cloudflare errors as CLOUDFLARE_ codes
             return `CLOUDFLARE_${errorCode}`;
@@ -391,9 +458,13 @@ async function checkDomainStatus(domain) {
         }
         return `SERVER_ERROR_${statusCode}`;
       }
+      
+      // Client errors (4xx errors)
+      // These often indicate access restrictions or bot detection
       if (statusCode >= 400) {
         debugLog(domain, domain, "Client error", statusCode);
         // Add more specific handling for 403 errors
+        // 403 Forbidden often indicates bot detection or access restrictions
         if (statusCode === 403) {
           debugLog(
             domain,
@@ -401,6 +472,7 @@ async function checkDomainStatus(domain) {
             "403 Forbidden - Possible bot detection or access restriction",
           );
           // Check if it's a Cloudflare protection
+          // Cloudflare uses specific headers to indicate bot protection
           const isCloudflare =
             headers["server"] && headers["server"].includes("cloudflare");
           const isCloudflareMitigated = headers["cf-mitigated"] === "challenge";
@@ -415,6 +487,7 @@ async function checkDomainStatus(domain) {
           }
 
           // Check for DDoS-Guard protection
+          // Another common bot protection service that returns 403 errors
           const isDDoSGuard =
             headers["server"] && headers["server"].includes("ddos-guard");
           if (isDDoSGuard) {
@@ -425,9 +498,11 @@ async function checkDomainStatus(domain) {
         return `CLIENT_ERROR_${statusCode}`;
       }
 
-      // Inspect body
+      // Inspect response body for additional error information
+      // Some servers include error details in the response body rather than headers
       if (body) {
-        // Cloudflare 5xx detection
+        // Cloudflare 5xx detection in response body
+        // Cloudflare sometimes embeds error information directly in the HTML response
         for (const code of [
           "500",
           "502",
@@ -441,11 +516,19 @@ async function checkDomainStatus(domain) {
           "525",
           "526",
         ]) {
+          // Look for Cloudflare error messages in the response body
           if (body.includes(`Error ${code}`)) {
             debugLog(domain, domain, "Cloudflare error detected:", code);
             // Handle Cloudflare SSL errors (525 and 526) as SSL issues
+            // Consistent handling with HTTP status code-based SSL error detection
             if (code === "525" || code === "526") {
-              return "SSL_ISSUE";
+              // Use unified SSL error handling for consistency
+              const sslError = handleSSLError(
+                domain, 
+                `CLOUDFLARE_${code}`, 
+                CLOUDFLARE_ERROR_DESCRIPTIONS[code]
+              );
+              return sslError.status;
             }
             // Handle other Cloudflare errors as CLOUDFLARE_ codes
             return `CLOUDFLARE_${code}`;
@@ -453,9 +536,11 @@ async function checkDomainStatus(domain) {
         }
 
         // WAF / protection detection
+        // Detect Web Application Firewall protection pages
+        // These indicate the site is protected and may not be accessible to automated tools
         if (
           body.includes("Cloudflare Ray ID") ||
-          WAF_PATTERNS.some((p) => body.includes(p))
+          CONTENT_PATTERNS.WAF.some((p) => body.includes(p))
         ) {
           debugLog(domain, domain, "Protected by WAF");
           return "PROTECTED";
@@ -468,7 +553,9 @@ async function checkDomainStatus(domain) {
           return emptyCheck;
         }
 
-        if (PLACEHOLDER_PATTERNS.some((p) => body.includes(p))) {
+        // Check for placeholder/parked pages
+        // These indicate domains that are not actively hosting content
+        if (CONTENT_PATTERNS.PLACEHOLDER.some((p) => body.includes(p))) {
           debugLog(domain, domain, "Placeholder page detected");
           return "PLACEHOLDER";
         }
@@ -478,6 +565,7 @@ async function checkDomainStatus(domain) {
     }
 
     // If we've reached the max redirects, check if it's a protocol flip situation
+    // This handles cases where legitimate redirect chains exceed our limit
     if (redirects >= MAX_REDIRECTS) {
       // Check if the last few redirects were protocol flips
       debugLog(
@@ -511,20 +599,24 @@ async function checkDomain(domain) {
 /**
  * Main function that orchestrates the domain checking process
  * Extracts domains from JSDoc comments, deduplicates them, and checks each one
+ * This function handles command-line arguments and controls the overall flow
  */
 async function main() {
   const args = process.argv.slice(2);
   
-  // Parse arguments
+  // Parse command-line arguments
+  // This allows users to control the script's behavior
   let categories = null;
   let specificDomain = null;
   
   // Check if --verbose is in the arguments
+  // This enables detailed debugging output
   const verboseIndex = args.indexOf('--verbose');
   if (verboseIndex !== -1) {
     GLOBAL_DEBUG = true;
     
     // Check if there's a domain specified after --verbose
+    // This allows debugging of specific domains only
     if (args[verboseIndex + 1] && !args[verboseIndex + 1].startsWith('-')) {
       specificDomain = args[verboseIndex + 1];
       SPECIFIC_DOMAIN_DEBUG = specificDomain;
@@ -558,25 +650,31 @@ async function main() {
     let domains;
     if (specificDomain) {
       // If a specific domain is provided, only check that domain
+      // This is useful for debugging individual domains
       domains = [specificDomain];
     } else {
       // Otherwise, extract domains from JSDoc as usual
+      // This processes all domains found in the codebase
       domains = await extractDomainsFromJSDoc(categories);
     }
     
+    // Deduplicate root domains to avoid checking subdomains separately
+    // This reduces redundant checks and improves efficiency
     const uniqueDomains = deduplicateRootDomains(domains);
 
     console.log(`Found ${uniqueDomains.length} unique domains`);
     if (!uniqueDomains.length) return console.log("No domains found.");
 
     // In non-verbose mode, show the "Checking:" header
+    // This provides a clean list of domains being processed
     if (!GLOBAL_DEBUG) {
       console.log("Checking:");
     }
 
     const results = [];
 
-    // Sequential checking
+    // Sequential checking to avoid overwhelming servers
+    // Processing domains one at a time prevents rate limiting issues
     for (const domain of uniqueDomains) {
       // In non-verbose mode, just show the domain being checked
       if (!GLOBAL_DEBUG) {
@@ -594,14 +692,23 @@ async function main() {
         // Only show detailed status in verbose mode
         if (GLOBAL_DEBUG) {
           // For Cloudflare errors, show the description
-          if (
-            result.status.startsWith("CLOUDFLARE_") &&
-            CLOUDFLARE_ERROR_DESCRIPTIONS[result.status.split("_")[1]]
-          ) {
+          if (result.status.startsWith("CLOUDFLARE_")) {
             const errorCode = result.status.split("_")[1];
-            console.log(
-              `${icon} ${result.status} - ${CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]}`,
-            );
+            // Check if we have a description for this Cloudflare error code
+            if (CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]) {
+              console.log(
+                `${icon} ${result.status} - ${CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]}`,
+              );
+            } else {
+              console.log(`${icon} ${result.status}`);
+            }
+          } else if (result.status === "SSL_ISSUE") {
+            // For SSL issues, show the error details if available
+            if (result.error && result.message) {
+              console.log(`${icon} ${result.status} - ${result.error}: ${result.message}`);
+            } else {
+              console.log(`${icon} ${result.status}`);
+            }
           } else if (result.status === "PROTOCOL_FLIP_LOOP") {
             console.log(
               `${icon} ${result.status} - Site has HTTP/HTTPS protocol flip but is likely accessible`,
@@ -626,6 +733,7 @@ async function main() {
     }
 
     // Only show summary and problematic domains when NOT in specific domain debug mode
+    // This keeps output clean when debugging individual domains
     if (!SPECIFIC_DOMAIN_DEBUG) {
       // Add blank line after checking section in non-verbose mode
       if (!GLOBAL_DEBUG) {
@@ -656,7 +764,6 @@ async function main() {
       // Show detailed problematic domains grouped by status
       const problematic = results.filter(r => r.status !== "VALID");
       if (problematic.length > 0) {
-        console.log(""); // Ensure blank line before PROBLEMATIC DOMAIN(S)
         console.log("PROBLEMATIC DOMAIN(S):");
         
         // Group domains by status
@@ -679,9 +786,15 @@ async function main() {
           let statusLine = `${STATUS_ICONS[status] || "❓"} ${status}`;
           
           // Add Cloudflare error descriptions if applicable
-          if (status.startsWith("CLOUDFLARE_") && CLOUDFLARE_ERROR_DESCRIPTIONS[status.split("_")[1]]) {
+          if (status.startsWith("CLOUDFLARE_")) {
             const errorCode = status.split("_")[1];
-            statusLine += ` - ${CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]}`;
+            // Check if we have a description for this Cloudflare error code
+            if (CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]) {
+              statusLine += ` - ${CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]}`;
+            }
+          } else if (status === "SSL_ISSUE") {
+            // For SSL issues, add a general description
+            statusLine += " - SSL/TLS certificate or handshake issues";
           } else if (status === "PROTOCOL_FLIP_LOOP") {
             statusLine += " - Sites with HTTP/HTTPS protocol flip but likely accessible";
           }

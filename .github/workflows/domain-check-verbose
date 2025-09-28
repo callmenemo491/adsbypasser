@@ -1,0 +1,31 @@
+name: Domain Check Verbose
+
+on:
+  schedule:
+    # Run daily at 0 AM UTC
+    - cron: "0 0 * * *"
+  workflow_dispatch: # Allow manual triggering
+
+jobs:
+  domain-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+        with:
+          ref: develop
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v5
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run domain checker
+        # Force Node.js to not buffer stdout, so console.log prints immediately
+        run: node --enable-source-maps ci/check-domains.js --verbose
+        env:
+          NODE_NO_WARNINGS: 1 # Suppresses Node warnings cluttering the log.

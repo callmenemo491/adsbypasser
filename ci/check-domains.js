@@ -630,10 +630,9 @@ async function main() {
       console.log(""); // Empty line after domain list
     }
 
-    // Summary - Modified to match owner's preferred format
+    // Summary
     console.log("SUMMARY:");
-    console.log(""); // Ensure blank line after SUMMARY
-    
+        
     const counts = results.reduce((acc, r) => {
       acc[r.status] = (acc[r.status] || 0) + 1;
       return acc;
@@ -655,7 +654,6 @@ async function main() {
     const problematic = results.filter(r => r.status !== "VALID");
     if (problematic.length > 0) {
       console.log("PROBLEMATIC DOMAIN(S):");
-      console.log(""); // Ensure blank line after PROBLEMATIC DOMAIN(S)
       
       // Group domains by status
       const groupedProblems = {};
@@ -685,7 +683,6 @@ async function main() {
         }
         
         console.log(statusLine);
-        console.log(""); // Blank line after status line
         
         // List domains with indentation
         domains.forEach(domain => {
@@ -696,8 +693,6 @@ async function main() {
       console.log(""); // Extra blank line at the end
     }
 
-    // Remove the redundant "Found X problematic domain(s)" line
-    // This information is already conveyed by the Problem count in the summary
   } catch (error) {
     console.error("Error during domain checking:", error);
     process.exit(1);

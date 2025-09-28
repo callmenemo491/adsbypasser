@@ -9,7 +9,6 @@
  * @domain cn-av.com
  * @domain cnpics.org
  * @domain cnxx.me
- * @domain cosplay-xxx.com
  * @domain cosplay18.pics
  * @domain fc2ppv.stream
  * @domain fikfok.net
@@ -33,6 +32,7 @@
  * @domain porn-pig.com
  * @domain porn4f.com
  * @domain porn4f.org
+ * @domain s-porn.com
  * @domain sweetie-fox.com
  * @domain xcamcovid.com
  * @domain xxpics.org
@@ -49,7 +49,6 @@ _.register({
     "https://cn-av.com/upload/en/*",
     "https://cnpics.org/upload/en/*",
     "https://cnxx.me/upload/en/*",
-    "https://cosplay-xxx.com/upload/en/*",
     "https://cosplay18.pics/upload/en/*",
     "https://fc2ppv.stream/upload/en/*",
     "https://fikfok.net/upload/en/*",
@@ -73,6 +72,7 @@ _.register({
     "https://porn-pig.com/upload/en/*",
     "https://porn4f.com/upload/en/*",
     "https://porn4f.org/upload/en/*",
+    "https://s-porn.com/upload/en/*",
     "https://sweetie-fox.com/upload/en/*",
     "https://xcamcovid.com/upload/en/*",
     "https://xxpics.org/upload/en/*",

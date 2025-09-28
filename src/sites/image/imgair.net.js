@@ -4,6 +4,7 @@
  * @domain imgblaze.net
  * @domain imgfira.cc
  * @domain imgfrost.net
+ * @domain imgouhmde.sbs
  */
 _.register({
   rule: {
@@ -11,8 +12,8 @@ _.register({
       /^cloudgallery\.net$/,
       /^imgair\.net$/,
       /^imgblaze\.net$/,
-      /^imgfrost\.net$/,
       /^imgfira\.cc$/,
+      /^imgfrost\.net$/,
       /^img[a-z]{2,10}\.(sbs|shop)$/,
       /^pic[a-z]{2,10}\.(sbs|shop)$/,
       /^pix[a-z]{2,10}\.sbs$/,

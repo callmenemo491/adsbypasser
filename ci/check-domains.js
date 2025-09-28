@@ -1,195 +1,588 @@
 #!/usr/bin/env node
 
 /**
- * Simple domain checker - extracts domains from src/sites/**.js and reports validity
+ * CI Domain Checker
+ *
+ * Features:
+ *  - DNS resolution
+ *  - HTTP/HTTPS accessibility
+ *  - SSL/TLS validation
+ *  - Redirect loop detection
+ *  - Timeout handling
+ *  - Placeholder / parked page detection
+ *  - Cloudflare / WAF / 5xx error detection
+ *  - Blank or JS-only page detection
+ *  - Sequential domain checking
+ *
+ * Note on Cloudflare Bot Protection:
+ * Some sites use Cloudflare's advanced bot detection which cannot be bypassed
+ * by simple header spoofing. These sites will return 403 errors even with
+ * realistic browser headers. Such sites are marked as CLOUDFLARE_BOT_PROTECTION.
+ * For these sites, manual verification is required to determine if they are
+ * actually accessible to real users.
  */
+
 import { extractDomainsFromJSDoc } from "../build/jsdoc.js";
 import { deduplicateRootDomains } from "../build/domain.js";
 import dns from "dns/promises";
-import https from "https";
 import http from "http";
+import https from "https";
 import { URL } from "url";
 
-/**
- * Check if a domain is resolvable via DNS
- * @param {string} domain - Domain to check
- * @returns {Promise<boolean>} True if resolvable
- */
+/* ------------------------ CONFIG ------------------------ */
+const MAX_REDIRECTS = 5;
+const REQUEST_TIMEOUT_MS = 30000; // Increased from 10s to 30s to handle slow websites
+
+// Add browser-like headers to avoid bot detection
+// Updated to mimic Firefox browser more closely
+const DEFAULT_HEADERS = {
+  "User-Agent":
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:143.0) Gecko/20100101 Firefox/143.0",
+  Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+  "Accept-Language": "en-US,en;q=0.5",
+  "Accept-Encoding": "gzip, deflate, br, zstd",
+  Connection: "keep-alive",
+  "Upgrade-Insecure-Requests": "1",
+  "Sec-Fetch-Dest": "document",
+  "Sec-Fetch-Mode": "navigate",
+  "Sec-Fetch-Site": "cross-site",
+  "Sec-GPC": "1",
+  DNT: "1",
+  TE: "trailers",
+};
+
+const PLACEHOLDER_PATTERNS = [
+  "Welcome to nginx!",
+  "This domain is parked",
+  "Buy this domain",
+  "Domain for sale",
+  "Default PLESK Page",
+];
+
+const WAF_PATTERNS = [
+  "Attention Required! | Cloudflare",
+  "Checking your browser before accessing",
+  "DDOS protection by",
+];
+
+// Cloudflare error descriptions for better understanding
+const CLOUDFLARE_ERROR_DESCRIPTIONS = {
+  500: "Internal Server Error - Cloudflare could not retrieve the web page",
+  502: "Bad Gateway - Cloudflare could not contact the origin server",
+  503: "Service Temporarily Unavailable - The server is temporarily unable to handle the request",
+  504: "Gateway Timeout - Cloudflare timed out contacting the origin server",
+  520: "Web Server Returns an Unknown Error - The origin server returned an empty, unknown, or unexplained response",
+  521: "Web Server Is Down - The origin server refused the connection",
+  522: "Connection Timed Out - Cloudflare could not negotiate a TCP handshake with the origin server",
+  523: "Origin Is Unreachable - Cloudflare could not reach the origin server",
+  524: "A Timeout Occurred - Cloudflare was able to complete a TCP connection but timed out waiting for an HTTP response",
+  525: "SSL Handshake Failed - Cloudflare could not negotiate an SSL/TLS handshake with the origin server",
+  526: "Invalid SSL Certificate - Cloudflare could not validate the SSL certificate of the origin server",
+};
+
+const STATUS_ICONS = {
+  VALID: "✅",
+  PLACEHOLDER: "⚠️",
+  EMPTY_PAGE: "📄",
+  JS_ONLY: "📜",
+  CLIENT_ERROR: "🚫",
+  SERVER_ERROR: "🔥",
+  SSL_ISSUE: "🔒",
+  EXPIRED: "❌",
+  UNREACHABLE: "🌐",
+  REFUSED: "⛔",
+  TIMEOUT: "⏱️",
+  REDIRECT_LOOP: "🔁",
+  PROTOCOL_FLIP_LOOP: "🔄",
+  INVALID_REDIRECT: "🔀",
+  PROTECTED: "🛡️",
+  CLOUDFLARE_BOT_PROTECTION: "🛡️403",
+  DDOS_GUARD_PROTECTION: "🛡️403",
+  CLOUDFLARE_500: "☁️500",
+  CLOUDFLARE_502: "☁️502",
+  CLOUDFLARE_503: "☁️503",
+  CLOUDFLARE_504: "☁️504",
+  CLOUDFLARE_520: "☁️520",
+  CLOUDFLARE_521: "☁️521",
+  CLOUDFLARE_522: "☁️522",
+  CLOUDFLARE_523: "☁️523",
+  CLOUDFLARE_524: "☁️524",
+};
+
+/* ------------------------ UTILITIES ------------------------ */
+
+/** Check if a domain is resolvable via DNS (IPv4/IPv6) */
 async function isDomainResolvable(domain) {
   try {
-    // Try IPv4 first
     await dns.resolve4(domain);
+    console.log(domain, "DNS resolved via A record");
     return true;
-  } catch (ipv4Error) {
+  } catch {
     try {
-      // Try IPv6 if IPv4 fails
       await dns.resolve6(domain);
+      console.log(domain, "DNS resolved via AAAA record");
       return true;
-    } catch (ipv6Error) {
+    } catch {
+      console.log(domain, "DNS NOT resolved");
       return false;
     }
   }
 }
 
-/**
- * Check if a domain is accessible via HTTP/HTTPS
- * @param {string} domain - Domain to check
- * @returns {Promise<boolean>} True if accessible
- */
-async function isDomainAccessible(domain) {
+/** Fetch a URL with timeout and return status, headers, and body */
+async function fetchUrl(url, timeoutMs = REQUEST_TIMEOUT_MS) {
+  console.log("Fetching", url);
+
+  // Extract domain from URL for error logging
+  const urlObj = new URL(url);
+  const domain = urlObj.hostname;
+
+  return new Promise((resolve) => {
+    const client = urlObj.protocol === "https:" ? https : http;
+
+    // Add default headers to the request
+    const requestOptions = {
+      hostname: urlObj.hostname,
+      port: urlObj.port,
+      path: urlObj.pathname + urlObj.search,
+      method: "GET",
+      headers: DEFAULT_HEADERS,
+    };
+
+    const timer = setTimeout(() => {
+      console.log("Timeout fetching", url, "after", timeoutMs, "ms");
+      resolve({ status: "TIMEOUT" });
+    }, timeoutMs);
+
+    const req = client.request(requestOptions, (res) => {
+      clearTimeout(timer);
+
+      // Log response headers
+      console.log("Response received for", url, "with status", res.statusCode);
+      console.log("Response headers:");
+      Object.entries(res.headers).forEach(function (entry) {
+        var key = entry[0];
+        var value = entry[1];
+        console.log("  " + key + ": " + value);
+      });
+
+      let body = "";
+      res.on("data", (chunk) => {
+        if (body.length < 8192) body += chunk.toString();
+      });
+      res.on("end", () => {
+        console.log("Response body size:", body.length, "bytes");
+        resolve({ statusCode: res.statusCode, headers: res.headers, body });
+      });
+    });
+
+    req.on("error", (err) => {
+      clearTimeout(timer);
+      console.log("Request error for", url, err.code, err.message);
+      if (["ECONNREFUSED", "ENOTFOUND", "EHOSTUNREACH"].includes(err.code))
+        resolve({ status: "REFUSED" });
+      else if (
+        [
+          "CERT_HAS_EXPIRED",
+          "DEPTH_ZERO_SELF_SIGNED_CERT",
+          "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+        ].includes(err.code)
+      ) {
+        console.log(
+          domain,
+          "SSL certificate issue detected:",
+          err.code,
+          err.message,
+        );
+        resolve({ status: "SSL_ISSUE", error: err.code, message: err.message });
+      } else resolve({ status: "UNREACHABLE" });
+    });
+
+    // Log when request is initiated
+    console.log("Initiating request to", url);
+
+    req.end();
+  });
+}
+
+/** Determine if a page is blank or only contains JavaScript */
+function isEmptyOrJsOnly(body) {
+  if (!body) return "EMPTY_PAGE";
+
+  // Remove head and noscript sections
+  let stripped = body.replace(/<head[^>]*>[\s\S]*?<\/head>/gi, "");
+  stripped = stripped.replace(/<noscript[^>]*>[\s\S]*?<\/noscript>/gi, "");
+  stripped = stripped.replace(/\s/g, "");
+
+  // Extract script content
+  const scriptMatches = body.match(/<script[^>]*>([\s\S]*?)<\/script>/gi);
+  const scriptContent = scriptMatches
+    ? scriptMatches
+        .map((script) => script.replace(/<script[^>]*>|<\/script>/gi, ""))
+        .join("")
+        .trim()
+    : "";
+
+  if (stripped === "" && scriptContent) return "JS_ONLY";
+  return stripped.length === 0 ? "EMPTY_PAGE" : false;
+}
+
+/* ------------------------ DOMAIN CHECK ------------------------ */
+
+/** Sequential domain check for one domain */
+async function checkDomainStatus(domain) {
   const protocols = ["https", "http"];
 
   for (const protocol of protocols) {
-    try {
-      const url = `${protocol}://${domain}`;
-      const urlObj = new URL(url);
-      const isHttps = protocol === "https";
-      const client = isHttps ? https : http;
+    let url = `${protocol}://${domain}`;
+    const visited = new Set();
+    let redirects = 0;
 
-      const result = await new Promise((resolve, reject) => {
-        const req = client.request(
-          {
-            hostname: urlObj.hostname,
-            port: urlObj.port || (isHttps ? 443 : 80),
-            path: urlObj.pathname,
-            method: "HEAD",
-            timeout: 5000,
-            headers: {
-              "User-Agent": "Mozilla/5.0 (compatible; DomainChecker/1.0)",
-            },
-          },
-          (res) => {
-            resolve(true);
-          },
-        );
+    while (redirects < MAX_REDIRECTS) {
+      if (visited.has(url)) {
+        console.log(domain, "Redirect loop detected at", url);
+        return "REDIRECT_LOOP";
+      }
+      visited.add(url);
 
-        req.on("error", () => resolve(false));
-        req.on("timeout", () => resolve(false));
-        req.end();
-      });
+      const { status, statusCode, headers, body, error, message } =
+        await fetchUrl(url);
 
-      if (result) return true;
-    } catch (error) {
-      continue;
+      if (status) {
+        console.log(domain, "Low-level status:", status);
+        // Special handling for SSL errors
+        if (status === "SSL_ISSUE") {
+          console.log(domain, "SSL issue:", error, message);
+          // Try HTTP instead of HTTPS for sites with SSL issues
+          if (protocol === "https") {
+            console.log(domain, "Will try HTTP instead of HTTPS");
+            break; // Exit the while loop to try HTTP
+          }
+          return status;
+        }
+        return status;
+      }
+
+      // Follow redirects
+      if (statusCode >= 300 && statusCode < 400 && headers.location) {
+        try {
+          const redirectUrl = new URL(headers.location, url);
+          // Check if this is a protocol flip (HTTPS to HTTP or vice versa) to the same domain
+          if (
+            redirectUrl.hostname === domain &&
+            ((url.startsWith("https://") && redirectUrl.protocol === "http:") ||
+              (url.startsWith("http://") && redirectUrl.protocol === "https:"))
+          ) {
+            // Check if we've already visited this protocol for this domain
+            const protocolKey = `${redirectUrl.protocol}//${redirectUrl.hostname}${redirectUrl.pathname}${redirectUrl.search}`;
+            if (visited.has(protocolKey)) {
+              console.log(
+                domain,
+                "Protocol flip redirect loop detected:",
+                url,
+                "->",
+                redirectUrl.toString(),
+              );
+              // This is a special case - the site works but has a protocol flip loop
+              // Let's try to determine if the site is actually accessible
+              return "PROTOCOL_FLIP_LOOP";
+            }
+          }
+
+          url = redirectUrl.toString();
+          redirects++;
+          console.log(domain, "Redirect to", url);
+          continue;
+        } catch (e) {
+          console.log(domain, "Error parsing redirect URL:", headers.location);
+          return "INVALID_REDIRECT";
+        }
+      }
+
+      // HTTP errors
+      if (statusCode >= 500) {
+        console.log(domain, "Server error", statusCode);
+        // Check for Cloudflare-specific errors and add descriptions
+        if (statusCode >= 500 && statusCode <= 526) {
+          const errorCode = statusCode.toString();
+          if (CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]) {
+            console.log(
+              domain,
+              `Cloudflare Error ${errorCode}:`,
+              CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode],
+            );
+            // Handle Cloudflare SSL errors (525 and 526) as SSL issues
+            if (errorCode === "525" || errorCode === "526") {
+              return "SSL_ISSUE";
+            }
+            // Handle other Cloudflare errors as CLOUDFLARE_ codes
+            return `CLOUDFLARE_${errorCode}`;
+          }
+        }
+        return `SERVER_ERROR_${statusCode}`;
+      }
+      if (statusCode >= 400) {
+        console.log(domain, "Client error", statusCode);
+        // Add more specific handling for 403 errors
+        if (statusCode === 403) {
+          console.log(
+            domain,
+            "403 Forbidden - Possible bot detection or access restriction",
+          );
+          // Check if it's a Cloudflare protection
+          const isCloudflare =
+            headers["server"] && headers["server"].includes("cloudflare");
+          const isCloudflareMitigated = headers["cf-mitigated"] === "challenge";
+
+          if (isCloudflare || isCloudflareMitigated) {
+            console.log(
+              domain,
+              "403 appears to be from Cloudflare bot detection",
+            );
+            return "CLOUDFLARE_BOT_PROTECTION";
+          }
+
+          // Check for DDoS-Guard protection
+          const isDDoSGuard =
+            headers["server"] && headers["server"].includes("ddos-guard");
+          if (isDDoSGuard) {
+            console.log(domain, "403 appears to be from DDoS-Guard protection");
+            return "DDOS_GUARD_PROTECTION";
+          }
+        }
+        return `CLIENT_ERROR_${statusCode}`;
+      }
+
+      // Inspect body
+      if (body) {
+        // Cloudflare 5xx detection
+        for (const code of [
+          "500",
+          "502",
+          "503",
+          "504",
+          "520",
+          "521",
+          "522",
+          "523",
+          "524",
+          "525",
+          "526",
+        ]) {
+          if (body.includes(`Error ${code}`)) {
+            console.log(domain, "Cloudflare error detected:", code);
+            if (CLOUDFLARE_ERROR_DESCRIPTIONS[code]) {
+              console.log(
+                domain,
+                `Cloudflare Error ${code}:`,
+                CLOUDFLARE_ERROR_DESCRIPTIONS[code],
+              );
+              // Handle Cloudflare SSL errors (525 and 526) as SSL issues
+              if (code === "525" || code === "526") {
+                return "SSL_ISSUE";
+              }
+              // Handle other Cloudflare errors as CLOUDFLARE_ codes
+              return `CLOUDFLARE_${code}`;
+            }
+            return `CLOUDFLARE_${code}`;
+          }
+        }
+
+        // WAF / protection detection
+        if (
+          body.includes("Cloudflare Ray ID") ||
+          WAF_PATTERNS.some((p) => body.includes(p))
+        ) {
+          console.log(domain, "Protected by WAF");
+          return "PROTECTED";
+        }
+
+        // Placeholder / blank / JS-only detection
+        const emptyCheck = isEmptyOrJsOnly(body);
+        if (emptyCheck) {
+          console.log(domain, "Empty/JS-only page detected:", emptyCheck);
+          return emptyCheck;
+        }
+
+        if (PLACEHOLDER_PATTERNS.some((p) => body.includes(p))) {
+          console.log(domain, "Placeholder page detected");
+          return "PLACEHOLDER";
+        }
+      }
+
+      return "VALID";
+    }
+
+    // If we've reached the max redirects, check if it's a protocol flip situation
+    if (redirects >= MAX_REDIRECTS) {
+      // Check if the last few redirects were protocol flips
+      console.log(
+        domain,
+        "Max redirects reached, checking for protocol flip pattern",
+      );
+      return "REDIRECT_LOOP";
     }
   }
 
-  return false;
+  return "UNREACHABLE";
 }
 
-/**
- * Check domain status
- * @param {string} domain - Domain to check
- * @returns {Promise<Object>} Status object
- */
+/** Wrapper with DNS resolution */
 async function checkDomain(domain) {
-  const isResolvable = await isDomainResolvable(domain);
-
-  if (!isResolvable) {
+  const resolvable = await isDomainResolvable(domain);
+  if (!resolvable)
     return { domain, status: "EXPIRED", resolvable: false, accessible: false };
-  }
 
-  const isAccessible = await isDomainAccessible(domain);
-
-  if (isAccessible) {
-    return { domain, status: "VALID", resolvable: true, accessible: true };
-  } else {
-    return {
-      domain,
-      status: "UNREACHABLE",
-      resolvable: true,
-      accessible: false,
-    };
-  }
+  const status = await checkDomainStatus(domain);
+  return { domain, status, resolvable: true, accessible: status === "VALID" };
 }
 
-/**
- * Main function
- */
+/* ------------------------ MAIN ------------------------ */
 async function main() {
   const args = process.argv.slice(2);
-  const categories = args.length > 0 ? args : null;
+  const categories = args.length ? args : null;
 
   console.log("Extracting domains from sites directory...");
-  if (categories) {
-    console.log(`Categories: ${categories.join(", ")}`);
-  } else {
-    console.log("Categories: all");
-  }
+  console.log(`Categories: ${categories ? categories.join(", ") : "all"}`);
 
   try {
-    // Extract domains from sites
     const domains = await extractDomainsFromJSDoc(categories);
     const uniqueDomains = deduplicateRootDomains(domains);
 
-    console.log(`Found ${uniqueDomains.length} unique root domains\n`);
+    console.log(`Found ${uniqueDomains.length} unique domains\n`);
+    if (!uniqueDomains.length) return console.log("No domains found.");
 
-    if (uniqueDomains.length === 0) {
-      console.log("No domains found.");
-      return;
-    }
-
-    // Check each domain
     const results = [];
-    for (const domain of uniqueDomains) {
-      process.stdout.write(`Checking ${domain}... `);
-      const result = await checkDomain(domain);
-      results.push(result);
 
-      const statusIcon =
-        result.status === "VALID"
-          ? "✅"
-          : result.status === "EXPIRED"
-            ? "❌"
-            : "⚠️";
-      console.log(`${statusIcon} ${result.status}`);
+    // Sequential checking
+    for (const domain of uniqueDomains) {
+      console.log(`\nChecking ${domain}...`);
+      try {
+        const result = await checkDomain(domain);
+        results.push(result);
+        const icon = STATUS_ICONS[result.status] || "❓";
+
+        // For Cloudflare errors, show the description
+        if (
+          result.status.startsWith("CLOUDFLARE_") &&
+          CLOUDFLARE_ERROR_DESCRIPTIONS[result.status.split("_")[1]]
+        ) {
+          const errorCode = result.status.split("_")[1];
+          console.log(
+            `${icon} ${result.status} - ${CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]}`,
+          );
+        } else if (result.status === "PROTOCOL_FLIP_LOOP") {
+          console.log(
+            `${icon} ${result.status} - Site has HTTP/HTTPS protocol flip but is likely accessible`,
+          );
+        } else if (result.status === "DDOS_GUARD_PROTECTION") {
+          console.log(
+            `${icon} ${result.status} - Site is protected by DDoS-Guard and may be accessible in browsers`,
+          );
+        } else {
+          console.log(`${icon} ${result.status}`);
+        }
+      } catch (error) {
+        console.error(`Error checking domain ${domain}:`, error.message);
+        results.push({ domain, status: "CHECK_FAILED" });
+        console.log(`❌ CHECK_FAILED`);
+      }
     }
 
     // Summary
     console.log("\n" + "=".repeat(50));
     console.log("SUMMARY:");
 
-    const validCount = results.filter((r) => r.status === "VALID").length;
-    const expiredCount = results.filter((r) => r.status === "EXPIRED").length;
-    const unreachableCount = results.filter(
-      (r) => r.status === "UNREACHABLE",
-    ).length;
+    const counts = results.reduce((acc, r) => {
+      acc[r.status] = (acc[r.status] || 0) + 1;
+      return acc;
+    }, {});
 
-    console.log(`✅ Valid: ${validCount}`);
-    console.log(`❌ Expired: ${expiredCount}`);
-    console.log(`⚠️  Unreachable: ${unreachableCount}`);
+    Object.keys(STATUS_ICONS).forEach((status) => {
+      if (counts[status]) {
+        // For Cloudflare errors, show the description in summary
+        if (
+          status.startsWith("CLOUDFLARE_") &&
+          CLOUDFLARE_ERROR_DESCRIPTIONS[status.split("_")[1]]
+        ) {
+          const errorCode = status.split("_")[1];
+          console.log(
+            `${STATUS_ICONS[status]} ${status} - ${CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]}: ${counts[status]}`,
+          );
+        } else if (status === "PROTOCOL_FLIP_LOOP") {
+          console.log(
+            `${STATUS_ICONS[status]} ${status} - Sites with HTTP/HTTPS protocol flip but likely accessible: ${counts[status]}`,
+          );
+        } else if (status === "DDOS_GUARD_PROTECTION") {
+          console.log(
+            `${STATUS_ICONS[status]} ${status} - Sites protected by DDoS-Guard but likely accessible: ${counts[status]}`,
+          );
+        } else {
+          console.log(`${STATUS_ICONS[status]} ${status}: ${counts[status]}`);
+        }
+      }
+    });
+
+    // Show counts for Cloudflare errors that don't have icons
+    Object.keys(counts).forEach((status) => {
+      if (
+        status.startsWith("CLOUDFLARE_") &&
+        !STATUS_ICONS[status] &&
+        CLOUDFLARE_ERROR_DESCRIPTIONS[status.split("_")[1]]
+      ) {
+        const errorCode = status.split("_")[1];
+        console.log(
+          `☁️${errorCode} ${status} - ${CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]}: ${counts[status]}`,
+        );
+      }
+    });
+
+    // Show CHECK_FAILED count if any
+    if (counts["CHECK_FAILED"]) {
+      console.log(`❌ CHECK_FAILED: ${counts["CHECK_FAILED"]}`);
+    }
+
     console.log(`📊 Total: ${results.length}`);
 
-    // Show expired domains
-    const expiredDomains = results
-      .filter((r) => r.status === "EXPIRED")
-      .map((r) => r.domain);
-    if (expiredDomains.length > 0) {
-      console.log("\n❌ EXPIRED DOMAINS:");
-      expiredDomains.forEach((domain) => console.log(`  - ${domain}`));
-    }
+    const problematic = results.filter((r) => r.status !== "VALID");
+    problematic.forEach((r) => {
+      const icon = STATUS_ICONS[r.status] || "❓";
+      // For Cloudflare errors, show the description in detailed list
+      if (
+        r.status.startsWith("CLOUDFLARE_") &&
+        CLOUDFLARE_ERROR_DESCRIPTIONS[r.status.split("_")[1]]
+      ) {
+        const errorCode = r.status.split("_")[1];
+        console.log(
+          `${icon} ${r.status} - ${CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]} -> ${r.domain}`,
+        );
+      } else if (r.status === "PROTOCOL_FLIP_LOOP") {
+        console.log(
+          `${icon} ${r.status} - Site has HTTP/HTTPS protocol flip but is likely accessible -> ${r.domain}`,
+        );
+      } else if (r.status === "DDOS_GUARD_PROTECTION") {
+        console.log(
+          `${icon} ${r.status} - Site is protected by DDoS-Guard and may be accessible in browsers -> ${r.domain}`,
+        );
+      } else if (r.status === "CHECK_FAILED") {
+        console.log(`${icon} ${r.status} -> ${r.domain}`);
+      } else {
+        console.log(`${icon} ${r.status} -> ${r.domain}`);
+      }
+    });
 
-    // Show unreachable domains
-    const unreachableDomains = results
-      .filter((r) => r.status === "UNREACHABLE")
-      .map((r) => r.domain);
-    if (unreachableDomains.length > 0) {
-      console.log("\n⚠️  UNREACHABLE DOMAINS:");
-      unreachableDomains.forEach((domain) => console.log(`  - ${domain}`));
-    }
-
-    // Report summary (no exit codes for reporting mode)
-    const invalidCount = expiredCount + unreachableCount;
-    if (invalidCount > 0) {
-      console.log(`\n⚠️  Found ${invalidCount} invalid domain(s)`);
-    } else {
-      console.log("\n✅ All domains are valid!");
-    }
+    console.log(
+      problematic.length
+        ? `\n⚠️ Found ${problematic.length} problematic domain(s)`
+        : "\n✅ All domains are valid!",
+    );
   } catch (error) {
-    console.error(`Error: ${error.message}`);
+    console.error("Error during domain checking:", error);
     process.exit(1);
   }
 }
 
-// Execute main function directly
-main().catch(console.error);
+main().catch((error) => {
+  console.error("Unhandled error:", error);
+  process.exit(1);
+});

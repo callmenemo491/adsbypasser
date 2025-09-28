@@ -1,19 +1,14 @@
 /**
  * @domain detonating.com
- * @domain looble.net
- * @domain pornyhost.com
- * @domain smilinglinks.com
  * @domain urlcash.com
- * @domain urlcash.org
  * @domain urlgalleries.com
  * @domain xxxs.org
  */
 _.register({
   rule: {
     host: [
-      /(^|\.)urlcash\.(com|org)$/,
-      /^(detonating|smilinglinks|pornyhost|urlgalleries)\.com$/,
-      /^looble\.net$/,
+      /^(detonating|urlgalleries)\.com$/,
+      /(^|\.)urlcash\.com$/,
       /^xxxs\.org$/,
     ],
   },

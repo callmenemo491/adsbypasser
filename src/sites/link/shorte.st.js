@@ -1,20 +1,13 @@
 /**
  * @domain ceesty.com
- * @domain clkmein.com
  * @domain cllkme.com
  * @domain corneey.com
  * @domain destyy.com
  * @domain festyy.com
  * @domain gestyy.com
- * @domain sh.st
  */
 (function () {
-  const hostRules = [
-    /^(cllkme|clkmein|corneey|ceesty)\.com$/,
-    /^(destyy|festyy|gestyy)\.com$/,
-    // else
-    /^sh\.st$/,
-  ];
+  const hostRules = [/^(ceesty|cllkme|corneey|destyy|festyy|gestyy)\.com$/];
 
   _.register({
     rule: {

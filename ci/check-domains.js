@@ -625,72 +625,77 @@ async function main() {
       }
     }
 
-    // Add blank line after checking section in non-verbose mode
-    if (!GLOBAL_DEBUG) {
-      console.log(""); // Empty line after domain list
-    }
+    // Only show summary and problematic domains when NOT in specific domain debug mode
+    if (!SPECIFIC_DOMAIN_DEBUG) {
+      // Add blank line after checking section in non-verbose mode
+      if (!GLOBAL_DEBUG) {
+        console.log(""); // Empty line after domain list
+      }
 
-    // Summary
-    console.log("SUMMARY:");
-        
-    const counts = results.reduce((acc, r) => {
-      acc[r.status] = (acc[r.status] || 0) + 1;
-      return acc;
-    }, {});
+      // Summary
+      console.log("--------------------------------------------------");
+      console.log("SUMMARY:");
 
-    // Show VALID count
-    const validCount = counts["VALID"] || 0;
-    console.log(`✅ VALID: ${validCount}`);
+      const counts = results.reduce((acc, r) => {
+        acc[r.status] = (acc[r.status] || 0) + 1;
+        return acc;
+      }, {});
 
-    // Show Problem count (all non-VALID domains)
-    const problemCount = results.filter(r => r.status !== "VALID").length;
-    console.log(`⚠️ Problem: ${problemCount}`);
+      // Show VALID count
+      const validCount = counts["VALID"] || 0;
+      console.log(`✅ VALID: ${validCount}`);
 
-    // Show Total count
-    console.log(`📊 Total: ${results.length}`);
-    console.log(""); // Ensure blank line after summary counts
+      // Show Problem count (all non-VALID domains)
+      const problemCount = results.filter(r => r.status !== "VALID").length;
+      console.log(`⚠️ Problem: ${problemCount}`);
 
-    // Show detailed problematic domains grouped by status
-    const problematic = results.filter(r => r.status !== "VALID");
-    if (problematic.length > 0) {
-      console.log("PROBLEMATIC DOMAIN(S):");
-      
-      // Group domains by status
-      const groupedProblems = {};
-      problematic.forEach(r => {
-        if (!groupedProblems[r.status]) {
-          groupedProblems[r.status] = [];
-        }
-        groupedProblems[r.status].push(r.domain);
-      });
-      
-      // Display grouped problems
-      Object.keys(groupedProblems).forEach((status, index) => {
-        // Add extra spacing before each group except the first
-        if (index > 0) {
-          console.log(""); // Extra blank line between groups
-        }
+      // Show Total count
+      console.log(`📊 Total: ${results.length}`);
+      console.log(""); // Ensure blank line after summary counts
+
+      // Show detailed problematic domains grouped by status
+      const problematic = results.filter(r => r.status !== "VALID");
+      if (problematic.length > 0) {
+        console.log(""); // Ensure blank line before PROBLEMATIC DOMAIN(S)
+        console.log("PROBLEMATIC DOMAIN(S):");
         
-        const domains = groupedProblems[status];
-        let statusLine = `${STATUS_ICONS[status] || "❓"} ${status}`;
-        
-        // Add Cloudflare error descriptions if applicable
-        if (status.startsWith("CLOUDFLARE_") && CLOUDFLARE_ERROR_DESCRIPTIONS[status.split("_")[1]]) {
-          const errorCode = status.split("_")[1];
-          statusLine += ` - ${CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]}`;
-        } else if (status === "PROTOCOL_FLIP_LOOP") {
-          statusLine += " - Sites with HTTP/HTTPS protocol flip but likely accessible";
-        }
-        
-        console.log(statusLine);
-        
-        // List domains with indentation
-        domains.forEach(domain => {
-          console.log(`- ${domain}`);
+        // Group domains by status
+        const groupedProblems = {};
+        problematic.forEach(r => {
+          if (!groupedProblems[r.status]) {
+            groupedProblems[r.status] = [];
+          }
+          groupedProblems[r.status].push(r.domain);
         });
-      });
-      
-      console.log(""); // Extra blank line at the end
+        
+        // Display grouped problems
+        Object.keys(groupedProblems).forEach((status, index) => {
+          // Add extra spacing before each group except the first
+          if (index > 0) {
+            console.log(""); // Extra blank line between groups
+          }
+          
+          const domains = groupedProblems[status];
+          let statusLine = `${STATUS_ICONS[status] || "❓"} ${status}`;
+          
+          // Add Cloudflare error descriptions if applicable
+          if (status.startsWith("CLOUDFLARE_") && CLOUDFLARE_ERROR_DESCRIPTIONS[status.split("_")[1]]) {
+            const errorCode = status.split("_")[1];
+            statusLine += ` - ${CLOUDFLARE_ERROR_DESCRIPTIONS[errorCode]}`;
+          } else if (status === "PROTOCOL_FLIP_LOOP") {
+            statusLine += " - Sites with HTTP/HTTPS protocol flip but likely accessible";
+          }
+          
+          console.log(statusLine);
+          
+          // List domains with indentation
+          domains.forEach(domain => {
+            console.log(`- ${domain}`);
+          });
+        });
+        
+        console.log(""); // Extra blank line at the end
+      }
     }
 
   } catch (error) {

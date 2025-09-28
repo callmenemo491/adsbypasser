@@ -625,8 +625,13 @@ async function main() {
       }
     }
 
+    // Add blank line after checking section in non-verbose mode
+    if (!GLOBAL_DEBUG) {
+      console.log(""); // Empty line after domain list
+    }
+
     // Summary - Modified to match owner's preferred format
-    console.log("\nSUMMARY:");
+    console.log("SUMMARY:\n");
     
     const counts = results.reduce((acc, r) => {
       acc[r.status] = (acc[r.status] || 0) + 1;
@@ -642,12 +647,12 @@ async function main() {
     console.log(`⚠️ Problem: ${problemCount}`);
 
     // Show Total count
-    console.log(`📊 Total: ${results.length}`);
+    console.log(`📊 Total: ${results.length}\n`);
 
     // Show detailed problematic domains grouped by status
     const problematic = results.filter(r => r.status !== "VALID");
     if (problematic.length > 0) {
-      console.log("\nPROBLEMATIC DOMAIN(S):");
+      console.log("PROBLEMATIC DOMAIN(S):\n");
       
       // Group domains by status
       const groupedProblems = {};
@@ -680,13 +685,10 @@ async function main() {
         
         console.log(""); // Empty line for spacing
       });
+    } else {
+      console.log(""); // Empty line when no problematic domains
     }
 
-    console.log(
-      problemCount > 0
-        ? `\n⚠️ Found ${problemCount} problematic domain(s)`
-        : "\n✅ All domains are valid!",
-    );
   } catch (error) {
     console.error("Error during domain checking:", error);
     process.exit(1);

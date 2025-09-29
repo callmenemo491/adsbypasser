@@ -1,4 +1,3 @@
-REFACT:
 # AdsBypasser
 
 [![Build Status](https://github.com/adsbypasser/adsbypasser/actions/workflows/unit-test.yaml/badge.svg)](https://github.com/adsbypasser/adsbypasser/actions)
@@ -131,7 +130,7 @@ A: Userscript managers automatically update scripts. You can also manually check
 - Client-side userscript, no telemetry by default
 - Review `dist/` before installing if you have security concerns
 - Do not use to bypass payment walls or violate site terms of service
-- See our [Security Policy](SECURITY.md) for reporting vulnerabilities
+- See our [Security Policy](.github/SECURITY.md) for reporting vulnerabilities
 - Licensed under the BSD 3-Clause License — see [LICENSE.txt](LICENSE.txt)
 
 ## Acknowledgements
